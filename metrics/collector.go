@@ -27,6 +27,9 @@ type Collector struct {
 	// Receiver 级别指标
 	// todo 不应该保存一个map，因为 receiver 停止后还需要删除key，很不优雅
 	// todo 全局应该只有一个 receiver collector，因为 receiver 相关指标是根据 label 来区分的，而不是根据 map 的key区分
+
+	// todo 提供方法让用户在 具体的 receiver 中创建 collector 再注册到全局，然后全局进行暴露metrics
+	// todo 这样对代码没有侵入性
 	receiverMetrics map[string]ReceiverMetrics // key: pipelineID:receiverType
 
 	// Pipeline 级别指标
