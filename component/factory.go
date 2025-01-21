@@ -2,12 +2,13 @@ package component
 
 import (
 	"fmt"
+	"gofire/metrics"
 	"sync"
 )
 
 // 定义组件创建器的函数类型
 
-type ReceiverCreator func(config map[string]interface{}) (Receiver, error)
+type ReceiverCreator func(config map[string]interface{}, metrics *metrics.Collector) (Receiver, error)
 type ProcessorCreator func(config map[string]interface{}) (Processor, error)
 type ExporterCreator func(config map[string]interface{}) (Exporter, error)
 
@@ -17,13 +18,19 @@ type Factory struct {
 	processors map[string]ProcessorCreator
 	exporters  map[string]ExporterCreator
 	mu         sync.RWMutex
+	metrics    *metrics.Collector
 }
 
-var factory = NewComponentFactory()
+func (f *Factory) Metrics() *metrics.Collector {
+	return f.metrics
+}
+
+var factory = NewComponentFactory(metrics.Default())
 
 // NewComponentFactory 创建新的组件工厂
-func NewComponentFactory() *Factory {
+func NewComponentFactory(metrics *metrics.Collector) *Factory {
 	return &Factory{
+		metrics:    metrics,
 		receivers:  make(map[string]ReceiverCreator),
 		processors: make(map[string]ProcessorCreator),
 		exporters:  make(map[string]ExporterCreator),
@@ -64,7 +71,7 @@ func RegisterExporter(typeName string, creator ExporterCreator) {
 }
 
 // CreateReceiver 创建接收器实例
-func (f *Factory) CreateReceiver(typeName string, config map[string]interface{}) (Receiver, error) {
+func (f *Factory) CreateReceiver(pipeline string, typeName string, config map[string]interface{}) (Receiver, error) {
 	f.mu.RLock()
 	creator, exists := f.receivers[typeName]
 	f.mu.RUnlock()
@@ -72,8 +79,8 @@ func (f *Factory) CreateReceiver(typeName string, config map[string]interface{})
 	if !exists {
 		return nil, fmt.Errorf("未知的接收器类型: %s", typeName)
 	}
-
-	return creator(config)
+	config["@pipeline"] = pipeline
+	return creator(config, f.metrics)
 }
 
 // CreateProcessor 创建处理器实例
@@ -100,17 +107,6 @@ func (f *Factory) CreateExporter(typeName string, config map[string]interface{})
 	}
 
 	return creator(config)
-}
-
-func CreateReceiver(typeName string, config map[string]interface{}) (Receiver, error) {
-	return factory.CreateReceiver(typeName, config)
-}
-
-func CreateProcessor(typeName string, config map[string]interface{}) (Processor, error) {
-	return factory.CreateProcessor(typeName, config)
-}
-func CreateExporter(typeName string, config map[string]interface{}) (Exporter, error) {
-	return factory.CreateExporter(typeName, config)
 }
 
 // GetReceiverTypes 获取所有已注册的接收器类型

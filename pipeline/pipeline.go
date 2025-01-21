@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gofire/component"
+	"gofire/pkg/logger"
 	"sync"
 	"time"
 )
@@ -21,6 +22,10 @@ type Pipeline struct {
 	errChan       chan error
 	batchSize     int           // 批处理大小
 	flushInterval time.Duration // 强制刷新间隔
+
+	stopOnce sync.Once    // 确保 Stop 只被执行一次
+	stopped  bool         // 标记是否已经停止
+	stopLock sync.RWMutex // 保护 stopped 标志
 }
 
 // NewPipeline 创建新的处理管道
@@ -34,7 +39,9 @@ func NewPipeline(receiver component.Receiver, processorLink *component.Processor
 		cancel:        cancel,
 		errChan:       make(chan error, 1),
 		batchSize:     1000,            // 默认批处理大小
-		flushInterval: time.Second * 5, // 默认5秒强制刷新
+		flushInterval: time.Second * 1, // 默认5秒强制刷新
+		stopOnce:      sync.Once{},
+		stopped:       false,
 	}
 }
 
@@ -84,6 +91,7 @@ func (p *Pipeline) run() {
 			msg, err := p.receiver.ReadMessage(p.ctx)
 			if err != nil {
 				p.errChan <- fmt.Errorf("读取消息错误: %w", err)
+				close(p.errChan)
 				return
 			}
 
@@ -111,13 +119,13 @@ func (p *Pipeline) processBatch(batch []map[string]interface{}) {
 	for _, msg := range batch {
 		processed, err := p.processorLink.Process(msg)
 		if err != nil {
-			p.errChan <- fmt.Errorf("处理消息错误: %w", err)
+			logger.Warnf("处理消息错误: %s", err)
 			continue
 		}
 
 		// 导出处理后的数据
 		if err = p.exporters.Export(processed...); err != nil {
-			p.errChan <- fmt.Errorf("导出消息错误: %w", err)
+			logger.Warnf("导出消息错误: %s", err)
 			continue
 		}
 	}
@@ -125,36 +133,67 @@ func (p *Pipeline) processBatch(batch []map[string]interface{}) {
 
 // Stop 停止处理管道
 func (p *Pipeline) Stop() error {
-	// 发送取消信号
-	p.cancel()
-
-	// 等待处理完成
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	// 设置超时时间
-	timeout := time.After(30 * time.Second)
-
-	select {
-	case <-done:
-		// 正常关闭
-	case <-timeout:
-		return fmt.Errorf("pipeline关闭超时")
+	// 检查是否已经停止
+	p.stopLock.RLock()
+	if p.stopped {
+		p.stopLock.RUnlock()
+		return fmt.Errorf("pipeline已经停止")
 	}
+	p.stopLock.RUnlock()
 
-	// 关闭组件
-	if err := p.receiver.Shutdown(); err != nil {
-		return fmt.Errorf("关闭receiver错误: %w", err)
-	}
+	var shutdownErr error
+	p.stopOnce.Do(func() {
+		// 标记为已停止
+		p.stopLock.Lock()
+		p.stopped = true
+		p.stopLock.Unlock()
 
-	if err := p.exporters.Shutdown(); err != nil {
-		return fmt.Errorf("关闭exporters错误: %w", err)
-	}
+		// 首先关闭 receiver，停止接收新数据
+		if err := p.receiver.Shutdown(); err != nil {
+			shutdownErr = fmt.Errorf("关闭receiver错误: %w", err)
+		}
+		// 无论 receiver 关闭是否成功，都发送取消信号以停止处理循环
+		p.cancel()
 
-	return nil
+		// 等待处理完成
+		done := make(chan struct{})
+		go func() {
+			p.wg.Wait()
+			close(done)
+		}()
+
+		// 设置超时时间
+		timeout := time.After(30 * time.Second)
+		select {
+		case <-done:
+			// 正常关闭
+		case <-timeout:
+			if shutdownErr != nil {
+				shutdownErr = fmt.Errorf("pipeline关闭超时且receiver关闭失败: %w", shutdownErr)
+				return
+			}
+			shutdownErr = fmt.Errorf("pipeline关闭超时")
+			return
+		}
+
+		// 最后关闭 exporters
+		if err := p.exporters.Shutdown(); err != nil {
+			if shutdownErr != nil {
+				shutdownErr = fmt.Errorf("关闭exporters错误: %w; 之前的错误: %w", err, shutdownErr)
+				return
+			}
+			shutdownErr = fmt.Errorf("关闭exporters错误: %w", err)
+		}
+	})
+
+	return shutdownErr
+}
+
+// IsRunning 返回 pipeline 是否正在运行
+func (p *Pipeline) IsRunning() bool {
+	p.stopLock.RLock()
+	defer p.stopLock.RUnlock()
+	return !p.stopped
 }
 
 // Errors 返回错误通道

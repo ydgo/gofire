@@ -3,8 +3,11 @@ package config
 import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
+	"github.com/prometheus/client_golang/prometheus"
 	"gofire/component"
+	"gofire/metrics"
 	"gofire/pipeline"
+	"gofire/pkg/logger"
 	"gopkg.in/yaml.v3"
 	"log"
 	"os"
@@ -38,6 +41,7 @@ type Manager struct {
 	configs     map[string]*PipelineConfig
 	mu          sync.RWMutex
 	factory     *component.Factory // 用于创建组件的工厂
+	metrics     *metrics.ConfigMetrics
 }
 
 // NewConfigManager 创建新的配置管理器
@@ -53,6 +57,7 @@ func NewConfigManager(configDir string, pipelineMgr *pipeline.Manager, factory *
 		watcher:     watcher,
 		configs:     make(map[string]*PipelineConfig),
 		factory:     factory,
+		metrics:     factory.Metrics().ConfigMetrics(),
 	}
 
 	return cm, nil
@@ -81,7 +86,7 @@ func (m *Manager) loadAllConfigs() error {
 	if err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
 	}
-
+	m.metrics.Total.Set(float64(len(files)))
 	// 记录新的配置
 	newConfigs := make(map[string]*PipelineConfig)
 
@@ -89,7 +94,7 @@ func (m *Manager) loadAllConfigs() error {
 	for _, file := range files {
 		config, err := m.loadConfigFile(file)
 		if err != nil {
-			log.Printf("加载配置文件 %s 失败: %v", file, err)
+			logger.Warnf("加载配置文件 %s 失败: %v", file, err)
 			continue
 		}
 		newConfigs[config.ID] = config
@@ -111,7 +116,6 @@ func (m *Manager) loadConfigFile(filename string) (*PipelineConfig, error) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
-
 	return &config, nil
 }
 
@@ -123,9 +127,9 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 	// 停止已删除的 Pipeline
 	for id := range m.configs {
 		if _, exists := newConfigs[id]; !exists {
-			log.Printf("停止已删除的 Pipeline: %s", id)
+			logger.Infof("停止已删除的 Pipeline: %s", id)
 			if err := m.pipelineMgr.StopPipeline(id); err != nil {
-				log.Printf("停止 Pipeline %s 失败: %v", id, err)
+				logger.Warnf("停止 Pipeline %s 失败: %v", id, err)
 			}
 		}
 	}
@@ -136,17 +140,19 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 		if !exists {
 			// 创建新的 Pipeline
 			if err := m.createPipeline(newConfig); err != nil {
-				log.Printf("创建 Pipeline %s 失败: %v", id, err)
+				logger.Infof("创建 Pipeline %s 失败: %v", id, err)
 				continue
 			}
 		} else if !m.configEquals(oldConfig, newConfig) {
+			// todo  id 修改为 name
+			m.metrics.Reload.With(prometheus.Labels{"name": id}).Inc() // 重载指标
 			// 配置发生变化，重新创建 Pipeline
-			log.Printf("更新 Pipeline: %s", id)
+			logger.Infof("更新 Pipeline: %s", id)
 			if err := m.pipelineMgr.StopPipeline(id); err != nil {
-				log.Printf("停止旧 Pipeline %s 失败: %v", id, err)
+				logger.Warnf("停止旧 Pipeline %s 失败: %v", id, err)
 			}
 			if err := m.createPipeline(newConfig); err != nil {
-				log.Printf("更新 Pipeline %s 失败: %v", id, err)
+				logger.Warnf("创建新 Pipeline %s 失败: %v", id, err)
 				continue
 			}
 		}
@@ -159,7 +165,7 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 // createPipeline 根据配置创建 Pipeline
 func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Receiver
-	receiver, err := m.factory.CreateReceiver(config.Receiver.Type, config.Receiver.Config)
+	receiver, err := m.factory.CreateReceiver(config.Name, config.Receiver.Type, config.Receiver.Config)
 	if err != nil {
 		return fmt.Errorf("创建 Receiver 失败: %w", err)
 	}
@@ -228,10 +234,129 @@ func (m *Manager) watchConfig() {
 
 // configEquals 比较两个配置是否相同
 func (m *Manager) configEquals(a, b *PipelineConfig) bool {
-	// 这里可以实现更详细的配置比较逻辑
-	dataA, _ := yaml.Marshal(a)
-	dataB, _ := yaml.Marshal(b)
-	return string(dataA) == string(dataB)
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	// 比较基本字段
+	if a.ID != b.ID || a.Name != b.Name {
+		return false
+	}
+
+	// 比较 Receiver
+	if a.Receiver.Type != b.Receiver.Type ||
+		!compareConfig(a.Receiver.Config, b.Receiver.Config) {
+		return false
+	}
+
+	// 比较 Processors
+	if len(a.Processors) != len(b.Processors) {
+		return false
+	}
+	for i := range a.Processors {
+		if a.Processors[i].Type != b.Processors[i].Type ||
+			!compareConfig(a.Processors[i].Config, b.Processors[i].Config) {
+			return false
+		}
+	}
+
+	// 比较 Exporters
+	if len(a.Exporters) != len(b.Exporters) {
+		return false
+	}
+	for i := range a.Exporters {
+		if a.Exporters[i].Type != b.Exporters[i].Type ||
+			!compareConfig(a.Exporters[i].Config, b.Exporters[i].Config) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// compareConfig 比较两个配置映射是否相同
+func compareConfig(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for k, va := range a {
+		vb, exists := b[k]
+		if !exists {
+			return false
+		}
+
+		// 处理嵌套的 map
+		if ma, okA := va.(map[string]interface{}); okA {
+			if mb, okB := vb.(map[string]interface{}); okB {
+				if !compareConfig(ma, mb) {
+					return false
+				}
+				continue
+			}
+			return false
+		}
+
+		// 处理切片
+		if sa, okA := va.([]interface{}); okA {
+			sb, okB := vb.([]interface{})
+			if !okB || len(sa) != len(sb) {
+				return false
+			}
+			// 比较切片中的每个元素
+			for i := range sa {
+				if !compareValue(sa[i], sb[i]) {
+					return false
+				}
+			}
+			continue
+		}
+
+		// 比较其他类型的值
+		if !compareValue(va, vb) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// compareValue 比较两个值是否相同
+func compareValue(a, b interface{}) bool {
+	// 处理数字类型的特殊情况
+	// YAML 解析可能会将整数解析为不同的数字类型
+	switch va := a.(type) {
+	case int:
+		switch vb := b.(type) {
+		case int:
+			return va == vb
+		case int64:
+			return int64(va) == vb
+		case float64:
+			return float64(va) == vb
+		}
+	case int64:
+		switch vb := b.(type) {
+		case int:
+			return va == int64(vb)
+		case int64:
+			return va == vb
+		case float64:
+			return float64(va) == vb
+		}
+	case float64:
+		switch vb := b.(type) {
+		case int:
+			return va == float64(vb)
+		case int64:
+			return va == float64(vb)
+		case float64:
+			return va == vb
+		}
+	}
+
+	// 其他类型直接比较
+	return a == b
 }
 
 // Stop 停止配置管理器

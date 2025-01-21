@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"gofire/pkg/logger"
 	"sync"
 	"time"
 )
@@ -87,11 +88,7 @@ func (pm *Manager) StartPipeline(id string) error {
 	pm.mu.Unlock()
 
 	// 启动 Pipeline 并监控错误
-	if err := pipeline.Start(); err != nil {
-		pm.updateStatus(id, StatusFailed, err)
-		return fmt.Errorf("启动 pipeline %s 失败: %w", id, err)
-	}
-
+	_ = pipeline.Start()
 	// 监控 Pipeline 错误
 	go pm.monitorPipeline(id, pipeline)
 
@@ -128,22 +125,17 @@ func (pm *Manager) StopPipeline(id string) error {
 		pm.mu.Unlock()
 		return fmt.Errorf("pipeline %s 不存在", id)
 	}
-
 	info := pm.status[id]
-	if info.Status != StatusRunning {
+	if info.Status != StatusRunning && info.Status != StatusFailed {
 		pm.mu.Unlock()
-		return fmt.Errorf("pipeline %s 未在运行", id)
+		return fmt.Errorf("pipeline %s 状态 [%s] 错误", id, info.Status)
 	}
-
 	info.Status = StatusStopping
-	pm.mu.Unlock()
-
 	// 停止 Pipeline
 	if err := pipeline.Stop(); err != nil {
-		pm.updateStatus(id, StatusFailed, err)
-		return fmt.Errorf("停止 pipeline %s 失败: %w", id, err)
+		logger.Warnf("停止 pipeline %s 异常: %s", id, err)
 	}
-
+	pm.mu.Unlock()
 	pm.updateStatus(id, StatusStopped, nil)
 	return nil
 }
@@ -214,10 +206,14 @@ func (pm *Manager) monitorPipeline(id string, pipeline *Pipeline) {
 	for {
 		select {
 		case err := <-pipeline.Errors():
-			if err != nil {
-				pm.updateStatus(id, StatusFailed, err)
-				return
+			pm.updateStatus(id, StatusFailed, err)
+			if err = pm.StopPipeline(id); err != nil {
+				logger.Warnf("停止运行错误的 pipeline %s 错误: %s", id, err)
+			} else {
+				logger.Warnf("停止运行错误的 pipeline %s 成功", id)
 			}
+			return
+
 		case <-pm.ctx.Done():
 			return
 		}
@@ -228,6 +224,11 @@ func (pm *Manager) monitorPipeline(id string, pipeline *Pipeline) {
 func (pm *Manager) updateStatus(id string, status Status, err error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	if status == StatusStopped {
+		delete(pm.pipelines, id)
+		delete(pm.status, id)
+		return
+	}
 
 	if info, exists := pm.status[id]; exists {
 		info.Status = status
