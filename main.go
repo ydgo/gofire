@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gofire/component"
 	"gofire/config"
@@ -35,12 +36,14 @@ func main() {
 	}
 
 	prometheus.MustRegister(metrics.Default())
+	prometheus.Unregister(collectors.NewGoCollector())
+	prometheus.Unregister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	factory := component.DefaultFactory()
 	logger.Debugf("Support receivers: %v", factory.GetReceiverTypes())
 	logger.Debugf("Support processors: %v", factory.GetProcessorTypes())
 	logger.Debugf("Support exporters: %v", factory.GetExporterTypes())
 
-	pipelineMgr := pipeline.NewPipelineManager()
+	pipelineMgr := pipeline.NewPipelineManager(metrics.Default())
 	logger.Debug("Pipeline manager created")
 	configMgr, err := config.NewConfigManager(configDir, pipelineMgr, factory)
 	if err != nil {

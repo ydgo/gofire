@@ -1,5 +1,3 @@
-id: "789"
-name: wiodo
 receiver:
   type: http
   config:
@@ -8,9 +6,6 @@ receiver:
     port: 8080
     max_pending_requests: 100
 processors:
-  - type: split
-    config:
-      separator: "/"
   - type: add_field
     config:
       field: name

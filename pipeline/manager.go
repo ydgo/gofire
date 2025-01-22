@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"gofire/metrics"
 	"gofire/pkg/logger"
 	"sync"
 	"time"
@@ -21,7 +22,6 @@ const (
 
 // Info 包含 Pipeline 的信息
 type Info struct {
-	ID        string    // Pipeline 唯一标识
 	Name      string    // Pipeline 名称
 	Status    Status    // Pipeline 状态
 	StartTime time.Time // 启动时间
@@ -30,6 +30,7 @@ type Info struct {
 
 // Manager 管理多个 Pipeline
 type Manager struct {
+	metrics   *metrics.PipelineManagerMetrics
 	pipelines map[string]*Pipeline // Pipeline 映射表
 	status    map[string]*Info     // Pipeline 状态信息
 	mu        sync.RWMutex         // 读写锁
@@ -38,9 +39,10 @@ type Manager struct {
 }
 
 // NewPipelineManager 创建新的 Pipeline 管理器
-func NewPipelineManager() *Manager {
+func NewPipelineManager(collector *metrics.Collector) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
+		metrics:   collector.PipelineManagerMetrics(),
 		pipelines: make(map[string]*Pipeline),
 		status:    make(map[string]*Info),
 		ctx:       ctx,
@@ -49,21 +51,20 @@ func NewPipelineManager() *Manager {
 }
 
 // RegisterPipeline 注册一个新的 Pipeline
-func (pm *Manager) RegisterPipeline(id string, name string, pipeline *Pipeline) error {
+func (pm *Manager) RegisterPipeline(name string, pipeline *Pipeline) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if _, exists := pm.pipelines[id]; exists {
-		return fmt.Errorf("pipeline %s 已存在", id)
+	if _, exists := pm.pipelines[name]; exists {
+		return fmt.Errorf("pipeline %s 已存在", name)
 	}
 
-	pm.pipelines[id] = pipeline
-	pm.status[id] = &Info{
-		ID:     id,
+	pm.pipelines[name] = pipeline
+	pm.status[name] = &Info{
 		Name:   name,
 		Status: StatusCreated,
 	}
-
+	pm.metrics.IncPipelineTotal()
 	return nil
 }
 
@@ -163,18 +164,17 @@ func (pm *Manager) StopAll() error {
 }
 
 // GetStatus 获取指定 Pipeline 的状态
-func (pm *Manager) GetStatus(id string) (*Info, error) {
+func (pm *Manager) GetStatus(name string) (*Info, error) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	info, exists := pm.status[id]
+	info, exists := pm.status[name]
 	if !exists {
-		return nil, fmt.Errorf("pipeline %s 不存在", id)
+		return nil, fmt.Errorf("pipeline %s 不存在", name)
 	}
 
 	// 返回副本
 	return &Info{
-		ID:        info.ID,
 		Name:      info.Name,
 		Status:    info.Status,
 		StartTime: info.StartTime,
@@ -191,7 +191,6 @@ func (pm *Manager) ListPipelines() []*Info {
 	for _, info := range pm.status {
 		// 返回副本
 		result = append(result, &Info{
-			ID:        info.ID,
 			Name:      info.Name,
 			Status:    info.Status,
 			StartTime: info.StartTime,
@@ -202,15 +201,15 @@ func (pm *Manager) ListPipelines() []*Info {
 }
 
 // monitorPipeline 监控 Pipeline 的错误
-func (pm *Manager) monitorPipeline(id string, pipeline *Pipeline) {
+func (pm *Manager) monitorPipeline(name string, pipeline *Pipeline) {
 	for {
 		select {
 		case err := <-pipeline.Errors():
-			pm.updateStatus(id, StatusFailed, err)
-			if err = pm.StopPipeline(id); err != nil {
-				logger.Warnf("停止运行错误的 pipeline %s 错误: %s", id, err)
+			pm.updateStatus(name, StatusFailed, err)
+			if err = pm.StopPipeline(name); err != nil {
+				logger.Warnf("停止运行错误的 pipeline %s 错误: %s", name, err)
 			} else {
-				logger.Warnf("停止运行错误的 pipeline %s 成功", id)
+				logger.Warnf("停止运行错误的 pipeline %s 成功", name)
 			}
 			return
 
@@ -221,16 +220,17 @@ func (pm *Manager) monitorPipeline(id string, pipeline *Pipeline) {
 }
 
 // updateStatus 更新 Pipeline 状态
-func (pm *Manager) updateStatus(id string, status Status, err error) {
+func (pm *Manager) updateStatus(name string, status Status, err error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if status == StatusStopped {
-		delete(pm.pipelines, id)
-		delete(pm.status, id)
+		delete(pm.pipelines, name)
+		delete(pm.status, name)
+		pm.metrics.DecPipelineTotal()
 		return
 	}
 
-	if info, exists := pm.status[id]; exists {
+	if info, exists := pm.status[name]; exists {
 		info.Status = status
 		info.Error = err
 	}

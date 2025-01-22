@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"gofire/component"
 	"gofire/metrics"
 	"gofire/pkg/logger"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -23,9 +25,10 @@ type Receiver struct {
 	pipeline string
 	server   *http.Server
 	output   chan map[string]interface{}
-	stats    *Stats
-	metrics  *metrics.Collector
+	metrics  *metrics.ReceiverBasicMetrics
 	mu       sync.RWMutex
+
+	statusCodes *prometheus.CounterVec
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -44,7 +47,7 @@ type Config struct {
 }
 
 // NewReceiver 创建新的 HTTP 接收器
-func NewReceiver(config map[string]interface{}, collector *metrics.Collector) (component.Receiver, error) {
+func NewReceiver(pipeName string, config map[string]interface{}, collector *metrics.Collector) (component.Receiver, error) {
 	// 解析配置
 	var cfg Config
 
@@ -72,23 +75,27 @@ func NewReceiver(config map[string]interface{}, collector *metrics.Collector) (c
 		cfg.maxPendingRequests = 100
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	pipeline := config["@pipeline"].(string)
+
+	// 创建自定义指标
+	statusCodes := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "receiver_http_status_code_total",
+		Help: "Http receiver response status code total",
+	}, []string{"pipeline", "status"})
+
 	receiver := &Receiver{
-		pipeline:           pipeline, // todo 怎么拿到这个 id ？
+		pipeline:           pipeName,
 		ctx:                ctx,
 		cancel:             cancel,
 		output:             make(chan map[string]interface{}, cfg.maxPendingRequests),
 		port:               cfg.Port,
 		path:               cfg.Path,
 		maxPendingRequests: cfg.maxPendingRequests,
-		metrics:            collector,
-		stats: &Stats{
-			ReceiverBasicMetrics: metrics.ReceiverBasicMetrics{
-				Pipeline:     pipeline,
-				ReceiverType: "http",
-			},
-			statusCodes: make(map[int]float64),
-		},
+		metrics:            collector.ReceiverBasicMetrics(),
+		statusCodes:        statusCodes,
+	}
+	// 注册自定义指标
+	if err := receiver.metrics.RegisterCustomMetrics("receiver_http_status_code_total", receiver.statusCodes); err != nil {
+		return nil, fmt.Errorf("metrics register custom metrics: %w", err)
 	}
 
 	// 创建 HTTP 服务器
@@ -99,8 +106,6 @@ func NewReceiver(config map[string]interface{}, collector *metrics.Collector) (c
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
 		Handler: mux,
 	}
-	// 更新初始统计信息
-	receiver.metrics.UpdateReceiverMetrics(receiver.pipeline, "http", receiver.stats)
 	// 启动 HTTP 服务器
 	go func() {
 		if err := receiver.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -125,8 +130,8 @@ func (r *Receiver) Shutdown() error {
 	if err != nil {
 		log.Printf("Shutdown error: %v\n", err)
 	}
+	r.metrics.UnregisterCustomMetrics("receiver_http_status_code_total")
 	close(r.output)
-	r.metrics.RemoveReceiverMetrics(r.pipeline, "http")
 	return err
 
 }
@@ -134,10 +139,11 @@ func (r *Receiver) Shutdown() error {
 // handleRequest 处理 HTTP 请求
 func (r *Receiver) handleRequest(w http.ResponseWriter, req *http.Request) {
 	startTime := time.Now()
+	r.metrics.SetLastReceiveTime(r.pipeline, "http", startTime)
 
 	// 确保是 POST 请求
 	if req.Method != http.MethodPost {
-		r.updateStats(http.StatusMethodNotAllowed, startTime)
+		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusMethodNotAllowed)).Inc()
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -145,7 +151,7 @@ func (r *Receiver) handleRequest(w http.ResponseWriter, req *http.Request) {
 	// 读取请求体
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		r.updateStats(http.StatusBadRequest, startTime)
+		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusBadRequest)).Inc()
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -157,17 +163,18 @@ func (r *Receiver) handleRequest(w http.ResponseWriter, req *http.Request) {
 		"message": string(body),
 		"host":    req.RemoteAddr,
 	}
-
+	r.metrics.IncTotal(r.pipeline, "http") // 指标更新
 	// 尝试发送数据到输出通道
 	select {
 	case r.output <- data:
-		r.updateStats(http.StatusOK, startTime)
+		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusOK)).Inc()
 		w.WriteHeader(http.StatusOK)
-
-	case <-time.After(5 * time.Second): // 添加超时处理
-		r.updateStats(http.StatusServiceUnavailable, startTime)
+	case <-time.After(time.Second * 3):
+		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusServiceUnavailable)).Inc()
+		r.metrics.IncFailures(r.pipeline, "http") // 指标更新
 		http.Error(w, "Pipeline busy", http.StatusServiceUnavailable)
 	}
+	r.metrics.AddProcessDuration(r.pipeline, "http", time.Since(startTime)) // 指标更新
 }
 
 func (r *Receiver) ReadMessage(ctx context.Context) (map[string]interface{}, error) {
@@ -183,27 +190,6 @@ func (r *Receiver) ReadMessage(ctx context.Context) (map[string]interface{}, err
 
 	}
 
-}
-
-// updateStats 更新统计信息
-func (r *Receiver) updateStats(statusCode int, startTime time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// todo 考虑比锁更好的实现方式，比如原子指令
-	// 更新基础统计信息
-	r.stats.ReceivedTotal++
-	if statusCode >= 400 {
-		r.stats.ReceivedFailures++
-	}
-	r.stats.LastReceiveTime = time.Now()
-
-	// 更新 HTTP 特定统计信息
-	r.stats.statusCodes[statusCode]++
-	r.stats.requestLatency = time.Since(startTime).Seconds()
-
-	// 更新收集器
-	r.metrics.UpdateReceiverMetrics(r.pipeline, "http", r.stats)
 }
 
 // 确保 HTTPReceiver 实现了 component.Receiver 接口

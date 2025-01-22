@@ -3,6 +3,8 @@ package processor
 import (
 	"errors"
 	"gofire/component"
+	"gofire/metrics"
+	"time"
 )
 
 func init() {
@@ -10,11 +12,13 @@ func init() {
 }
 
 type AddField struct {
-	field string
-	value interface{}
+	pipeline string
+	metrics  *metrics.ProcessorBasicMetrics
+	field    string
+	value    interface{}
 }
 
-func NewAddField(cfg map[string]interface{}) (component.Processor, error) {
+func NewAddField(pipeName string, cfg map[string]interface{}, collector *metrics.Collector) (component.Processor, error) {
 	field := cfg["field"].(string)
 	if field == "" {
 		return nil, errors.New("field is required")
@@ -23,14 +27,20 @@ func NewAddField(cfg map[string]interface{}) (component.Processor, error) {
 	if !ok {
 		return nil, errors.New("value is required")
 	}
-	return &AddField{field, value}, nil
+	return &AddField{
+		pipeline: pipeName,
+		metrics:  collector.ProcessorBasicMetrics(),
+		field:    field,
+		value:    value,
+	}, nil
 }
 
 func (p *AddField) Process(messages ...map[string]interface{}) ([]map[string]interface{}, error) {
+	start := time.Now()
 	for _, message := range messages {
+		p.metrics.IncTotal(p.pipeline, "add_field")
 		message[p.field] = p.value
 	}
-	// 指标上报
-	// 自定义指标上报
+	p.metrics.AddProcessDuration(p.pipeline, "add_field", time.Since(start))
 	return messages, nil
 }

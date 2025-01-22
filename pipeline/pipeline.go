@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gofire/component"
+	"gofire/metrics"
 	"gofire/pkg/logger"
 	"sync"
 	"time"
@@ -11,9 +12,12 @@ import (
 
 // Pipeline 代表一个完整的数据处理管道
 type Pipeline struct {
+	name          string
 	receiver      component.Receiver
 	processorLink *component.ProcessorLink
 	exporters     *component.Exporters
+
+	metrics *metrics.PipelineMetrics
 
 	// 控制和状态
 	wg            sync.WaitGroup
@@ -29,9 +33,10 @@ type Pipeline struct {
 }
 
 // NewPipeline 创建新的处理管道
-func NewPipeline(receiver component.Receiver, processorLink *component.ProcessorLink, exporters *component.Exporters) *Pipeline {
+func NewPipeline(name string, collector *metrics.Collector, receiver component.Receiver, processorLink *component.ProcessorLink, exporters *component.Exporters) *Pipeline {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
+		name:          name,
 		receiver:      receiver,
 		processorLink: processorLink,
 		exporters:     exporters,
@@ -42,6 +47,7 @@ func NewPipeline(receiver component.Receiver, processorLink *component.Processor
 		flushInterval: time.Second * 1, // 默认5秒强制刷新
 		stopOnce:      sync.Once{},
 		stopped:       false,
+		metrics:       collector.PipelineMetrics(),
 	}
 }
 
@@ -65,7 +71,6 @@ func (p *Pipeline) Start() error {
 // run 运行主处理循环
 func (p *Pipeline) run() {
 	defer p.wg.Done()
-
 	batch := make([]map[string]interface{}, 0, p.batchSize)
 	ticker := time.NewTicker(p.flushInterval)
 	defer ticker.Stop()
@@ -115,24 +120,31 @@ func (p *Pipeline) run() {
 
 // processBatch 处理一批数据
 func (p *Pipeline) processBatch(batch []map[string]interface{}) {
+	p.metrics.AddIn(p.name, float64(len(batch)))
 	// 处理数据
 	for _, msg := range batch {
 		processed, err := p.processorLink.Process(msg)
 		if err != nil {
 			logger.Warnf("处理消息错误: %s", err)
+			p.metrics.AddFailure(p.name, 1)
 			continue
 		}
+		p.metrics.AddProcessed(p.name, 1)
 
 		// 导出处理后的数据
 		if err = p.exporters.Export(processed...); err != nil {
 			logger.Warnf("导出消息错误: %s", err)
+			p.metrics.AddFailure(p.name, 1)
 			continue
 		}
+		// todo 这里的不包含 split 生成的数据
+		p.metrics.AddOut(p.name, 1)
 	}
 }
 
 // Stop 停止处理管道
 func (p *Pipeline) Stop() error {
+	defer p.metrics.Delete(p.name)
 	// 检查是否已经停止
 	p.stopLock.RLock()
 	if p.stopped {
@@ -185,7 +197,6 @@ func (p *Pipeline) Stop() error {
 			shutdownErr = fmt.Errorf("关闭exporters错误: %w", err)
 		}
 	})
-
 	return shutdownErr
 }
 

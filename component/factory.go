@@ -8,9 +8,9 @@ import (
 
 // 定义组件创建器的函数类型
 
-type ReceiverCreator func(config map[string]interface{}, metrics *metrics.Collector) (Receiver, error)
-type ProcessorCreator func(config map[string]interface{}) (Processor, error)
-type ExporterCreator func(config map[string]interface{}) (Exporter, error)
+type ReceiverCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Receiver, error)
+type ProcessorCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Processor, error)
+type ExporterCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Exporter, error)
 
 // Factory 组件工厂，用于创建各种组件
 type Factory struct {
@@ -71,7 +71,7 @@ func RegisterExporter(typeName string, creator ExporterCreator) {
 }
 
 // CreateReceiver 创建接收器实例
-func (f *Factory) CreateReceiver(pipeline string, typeName string, config map[string]interface{}) (Receiver, error) {
+func (f *Factory) CreateReceiver(pipeName string, typeName string, config map[string]interface{}) (Receiver, error) {
 	f.mu.RLock()
 	creator, exists := f.receivers[typeName]
 	f.mu.RUnlock()
@@ -79,12 +79,11 @@ func (f *Factory) CreateReceiver(pipeline string, typeName string, config map[st
 	if !exists {
 		return nil, fmt.Errorf("未知的接收器类型: %s", typeName)
 	}
-	config["@pipeline"] = pipeline
-	return creator(config, f.metrics)
+	return creator(pipeName, config, f.metrics)
 }
 
 // CreateProcessor 创建处理器实例
-func (f *Factory) CreateProcessor(typeName string, config map[string]interface{}) (Processor, error) {
+func (f *Factory) CreateProcessor(pipeName string, typeName string, config map[string]interface{}) (Processor, error) {
 	f.mu.RLock()
 	creator, exists := f.processors[typeName]
 	f.mu.RUnlock()
@@ -93,11 +92,11 @@ func (f *Factory) CreateProcessor(typeName string, config map[string]interface{}
 		return nil, fmt.Errorf("未知的处理器类型: %s", typeName)
 	}
 
-	return creator(config)
+	return creator(pipeName, config, f.metrics)
 }
 
 // CreateExporter 创建导出器实例
-func (f *Factory) CreateExporter(typeName string, config map[string]interface{}) (Exporter, error) {
+func (f *Factory) CreateExporter(pipeName string, typeName string, config map[string]interface{}) (Exporter, error) {
 	f.mu.RLock()
 	creator, exists := f.exporters[typeName]
 	f.mu.RUnlock()
@@ -106,7 +105,7 @@ func (f *Factory) CreateExporter(typeName string, config map[string]interface{})
 		return nil, fmt.Errorf("未知的导出器类型: %s", typeName)
 	}
 
-	return creator(config)
+	return creator(pipeName, config, f.metrics)
 }
 
 // GetReceiverTypes 获取所有已注册的接收器类型

@@ -11,14 +11,14 @@ import (
 	"gopkg.in/yaml.v3"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 )
 
 // PipelineConfig 表示单个 Pipeline 的配置
 type PipelineConfig struct {
-	ID       string `yaml:"id"`
-	Name     string `yaml:"name"`
+	name     string // config file name
 	Receiver struct {
 		Type   string                 `yaml:"type"`
 		Config map[string]interface{} `yaml:"config"`
@@ -38,10 +38,11 @@ type Manager struct {
 	configDir   string
 	pipelineMgr *pipeline.Manager
 	watcher     *fsnotify.Watcher
-	configs     map[string]*PipelineConfig
+	configs     map[string]*PipelineConfig // key: file name
 	mu          sync.RWMutex
 	factory     *component.Factory // 用于创建组件的工厂
 	metrics     *metrics.ConfigMetrics
+	collector   *metrics.Collector
 }
 
 // NewConfigManager 创建新的配置管理器
@@ -58,6 +59,7 @@ func NewConfigManager(configDir string, pipelineMgr *pipeline.Manager, factory *
 		configs:     make(map[string]*PipelineConfig),
 		factory:     factory,
 		metrics:     factory.Metrics().ConfigMetrics(),
+		collector:   factory.Metrics(),
 	}
 
 	return cm, nil
@@ -97,7 +99,7 @@ func (m *Manager) loadAllConfigs() error {
 			logger.Warnf("加载配置文件 %s 失败: %v", file, err)
 			continue
 		}
-		newConfigs[config.ID] = config
+		newConfigs[config.name] = config
 	}
 
 	// 对比新旧配置，进行更新
@@ -111,8 +113,11 @@ func (m *Manager) loadConfigFile(filename string) (*PipelineConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	configName := path.Base(filename)
+	fileSuffix := path.Ext(configName)
+	name := configName[0 : len(configName)-len(fileSuffix)]
 	var config PipelineConfig
+	config.name = name
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
@@ -165,7 +170,7 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 // createPipeline 根据配置创建 Pipeline
 func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Receiver
-	receiver, err := m.factory.CreateReceiver(config.Name, config.Receiver.Type, config.Receiver.Config)
+	receiver, err := m.factory.CreateReceiver(config.name, config.Receiver.Type, config.Receiver.Config)
 	if err != nil {
 		return fmt.Errorf("创建 Receiver 失败: %w", err)
 	}
@@ -173,7 +178,7 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Processors
 	var processors []component.Processor
 	for _, p := range config.Processors {
-		processor, err := m.factory.CreateProcessor(p.Type, p.Config)
+		processor, err := m.factory.CreateProcessor(config.name, p.Type, p.Config)
 		if err != nil {
 			return fmt.Errorf("创建 Processor 失败: %w", err)
 		}
@@ -183,7 +188,7 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Exporters
 	var exporters []component.Exporter
 	for _, e := range config.Exporters {
-		exporter, err := m.factory.CreateExporter(e.Type, e.Config)
+		exporter, err := m.factory.CreateExporter(config.name, e.Type, e.Config)
 		if err != nil {
 			return fmt.Errorf("创建 Exporter 失败: %w", err)
 		}
@@ -192,17 +197,19 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 
 	// 创建 Pipeline
 	pipe := pipeline.NewPipeline(
+		config.name, // pipeline name
+		m.collector,
 		receiver,
 		component.BuildProcessorLink(processors...),
 		component.BuildExporters(exporters...),
 	)
 
 	// 注册并启动 Pipeline
-	if err = m.pipelineMgr.RegisterPipeline(config.ID, config.Name, pipe); err != nil {
+	if err = m.pipelineMgr.RegisterPipeline(config.name, pipe); err != nil {
 		return fmt.Errorf("注册 Pipeline 失败: %w", err)
 	}
 
-	if err = m.pipelineMgr.StartPipeline(config.ID); err != nil {
+	if err = m.pipelineMgr.StartPipeline(config.name); err != nil {
 		return fmt.Errorf("启动 Pipeline 失败: %w", err)
 	}
 
@@ -239,7 +246,7 @@ func (m *Manager) configEquals(a, b *PipelineConfig) bool {
 	}
 
 	// 比较基本字段
-	if a.ID != b.ID || a.Name != b.Name {
+	if a.name != b.name {
 		return false
 	}
 
