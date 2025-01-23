@@ -14,6 +14,7 @@ import (
 	_ "gofire/processor"
 	_ "gofire/receiver"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"

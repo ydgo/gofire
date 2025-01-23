@@ -1,0 +1,7 @@
+receiver:
+  type: fasthttp
+  config:
+    port: 8081
+exporters:
+  - type: stdout
+

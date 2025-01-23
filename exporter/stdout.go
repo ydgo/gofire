@@ -1,8 +1,8 @@
 package exporter
 
 import (
-	"fmt"
 	"gofire/component"
+	"gofire/event"
 	"gofire/metrics"
 	"time"
 )
@@ -23,12 +23,9 @@ func NewStdoutExporter(pipeName string, config map[string]interface{}, collector
 	}, nil
 }
 
-func (e *StdoutExporter) Export(messages ...map[string]interface{}) error {
+func (e *StdoutExporter) Export(evt *event.Event) error {
 	start := time.Now()
-	e.metrics.AddTotal(e.pipeline, "stdout", float64(len(messages)))
-	for _, msg := range messages {
-		fmt.Println(msg)
-	}
+	e.metrics.IncTotal(e.pipeline, "stdout")
 	e.metrics.AddProcessDuration(e.pipeline, "stdout", time.Since(start))
 	return nil
 }

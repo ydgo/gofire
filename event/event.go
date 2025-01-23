@@ -11,7 +11,6 @@ type Event struct {
 	Timestamp time.Time              // 事件发生时间
 	Fields    map[string]interface{} // 事件字段
 	Message   string                 // 原始消息
-	pool      *sync.Pool             // 用于对象复用的池
 }
 
 // 创建一个全局的对象池

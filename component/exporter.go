@@ -1,7 +1,12 @@
 package component
 
+import (
+	"gofire/event"
+	"gofire/pkg/logger"
+)
+
 type Exporter interface {
-	Export(...map[string]interface{}) error
+	Export(*event.Event) error
 	Shutdown() error
 }
 
@@ -13,11 +18,16 @@ func BuildExporters(exporters ...Exporter) *Exporters {
 	return &Exporters{exporters: exporters}
 }
 
-func (e *Exporters) Export(messages ...map[string]interface{}) error {
-	for _, exporter := range e.exporters {
-		if err := exporter.Export(messages...); err != nil {
-			return err
+func (e *Exporters) Export(events ...*event.Event) error {
+	for _, evt := range events {
+		for _, exporter := range e.exporters {
+			if err := exporter.Export(evt); err != nil {
+				logger.Warnf("exporter export event failed: %s", err)
+				continue
+			}
 		}
+		// 一个事件被所有导出组件导出后被释放
+		evt.Release() // 释放 event
 	}
 	return nil
 }

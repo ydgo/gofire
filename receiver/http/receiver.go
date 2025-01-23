@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"gofire/component"
+	"gofire/event"
 	"gofire/metrics"
-	"gofire/pkg/logger"
 	"io"
 	"log"
 	"net/http"
@@ -24,7 +24,7 @@ func init() {
 type Receiver struct {
 	pipeline string
 	server   *http.Server
-	output   chan map[string]interface{}
+	output   chan *event.Event
 	metrics  *metrics.ReceiverBasicMetrics
 	mu       sync.RWMutex
 
@@ -86,7 +86,7 @@ func NewReceiver(pipeName string, config map[string]interface{}, collector *metr
 		pipeline:           pipeName,
 		ctx:                ctx,
 		cancel:             cancel,
-		output:             make(chan map[string]interface{}, cfg.maxPendingRequests),
+		output:             make(chan *event.Event, cfg.maxPendingRequests),
 		port:               cfg.Port,
 		path:               cfg.Path,
 		maxPendingRequests: cfg.maxPendingRequests,
@@ -130,7 +130,7 @@ func (r *Receiver) Shutdown() error {
 	if err != nil {
 		log.Printf("Shutdown error: %v\n", err)
 	}
-	r.metrics.UnregisterCustomMetrics("receiver_http_status_code_total")
+	r.metrics.Delete(r.pipeline)
 	close(r.output)
 	return err
 
@@ -159,17 +159,17 @@ func (r *Receiver) handleRequest(w http.ResponseWriter, req *http.Request) {
 
 	// todo codec text|json
 
-	data := map[string]interface{}{
-		"message": string(body),
-		"host":    req.RemoteAddr,
-	}
+	evt := event.NewEvent()
+	evt.SetMessage(string(body))
+
 	r.metrics.IncTotal(r.pipeline, "http") // 指标更新
 	// 尝试发送数据到输出通道
 	select {
-	case r.output <- data:
+	case r.output <- evt:
 		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusOK)).Inc()
 		w.WriteHeader(http.StatusOK)
 	case <-time.After(time.Second * 3):
+		evt.Release() // 释放 event
 		r.statusCodes.WithLabelValues(r.pipeline, strconv.Itoa(http.StatusServiceUnavailable)).Inc()
 		r.metrics.IncFailures(r.pipeline, "http") // 指标更新
 		http.Error(w, "Pipeline busy", http.StatusServiceUnavailable)
@@ -177,10 +177,9 @@ func (r *Receiver) handleRequest(w http.ResponseWriter, req *http.Request) {
 	r.metrics.AddProcessDuration(r.pipeline, "http", time.Since(startTime)) // 指标更新
 }
 
-func (r *Receiver) ReadMessage(ctx context.Context) (map[string]interface{}, error) {
+func (r *Receiver) ReadMessage(ctx context.Context) (*event.Event, error) {
 	select {
 	case <-ctx.Done():
-		logger.Debug(18)
 		return nil, ctx.Err()
 	case data, ok := <-r.output:
 		if !ok {

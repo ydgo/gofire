@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gofire/component"
+	"gofire/event"
 	"gofire/metrics"
 	"gofire/pkg/logger"
 	"sync"
@@ -44,7 +45,7 @@ func NewPipeline(name string, collector *metrics.Collector, receiver component.R
 		cancel:        cancel,
 		errChan:       make(chan error, 1),
 		batchSize:     1000,            // 默认批处理大小
-		flushInterval: time.Second * 1, // 默认5秒强制刷新
+		flushInterval: time.Second * 5, // 默认5秒强制刷新
 		stopOnce:      sync.Once{},
 		stopped:       false,
 		metrics:       collector.PipelineMetrics(),
@@ -71,7 +72,7 @@ func (p *Pipeline) Start() error {
 // run 运行主处理循环
 func (p *Pipeline) run() {
 	defer p.wg.Done()
-	batch := make([]map[string]interface{}, 0, p.batchSize)
+	batch := make([]*event.Event, 0, p.batchSize)
 	ticker := time.NewTicker(p.flushInterval)
 	defer ticker.Stop()
 
@@ -88,7 +89,7 @@ func (p *Pipeline) run() {
 			// 定时刷新
 			if len(batch) > 0 {
 				p.processBatch(batch)
-				batch = make([]map[string]interface{}, 0, p.batchSize)
+				batch = make([]*event.Event, 0, p.batchSize)
 			}
 
 		default:
@@ -112,18 +113,18 @@ func (p *Pipeline) run() {
 			batch = append(batch, msg)
 			if len(batch) >= p.batchSize {
 				p.processBatch(batch)
-				batch = make([]map[string]interface{}, 0, p.batchSize)
+				batch = make([]*event.Event, 0, p.batchSize)
 			}
 		}
 	}
 }
 
 // processBatch 处理一批数据
-func (p *Pipeline) processBatch(batch []map[string]interface{}) {
+func (p *Pipeline) processBatch(batch []*event.Event) {
 	p.metrics.AddIn(p.name, float64(len(batch)))
 	// 处理数据
-	for _, msg := range batch {
-		processed, err := p.processorLink.Process(msg)
+	for _, evt := range batch {
+		processed, err := p.processorLink.Process(evt) // evt 的释放由 Process 决定，如果仍需使用请复制一份
 		if err != nil {
 			logger.Warnf("处理消息错误: %s", err)
 			p.metrics.AddFailure(p.name, 1)
@@ -132,6 +133,7 @@ func (p *Pipeline) processBatch(batch []map[string]interface{}) {
 		p.metrics.AddProcessed(p.name, 1)
 
 		// 导出处理后的数据
+		// processed 中的 event 由 Export 负责释放
 		if err = p.exporters.Export(processed...); err != nil {
 			logger.Warnf("导出消息错误: %s", err)
 			p.metrics.AddFailure(p.name, 1)

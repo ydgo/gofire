@@ -3,6 +3,7 @@ package processor
 import (
 	"errors"
 	"gofire/component"
+	"gofire/event"
 	"gofire/metrics"
 	"time"
 )
@@ -35,12 +36,12 @@ func NewAddField(pipeName string, cfg map[string]interface{}, collector *metrics
 	}, nil
 }
 
-func (p *AddField) Process(messages ...map[string]interface{}) ([]map[string]interface{}, error) {
+func (p *AddField) Process(events ...*event.Event) ([]*event.Event, error) {
 	start := time.Now()
-	for _, message := range messages {
-		p.metrics.IncTotal(p.pipeline, "add_field")
-		message[p.field] = p.value
+	p.metrics.AddTotal(p.pipeline, "add_field", float64(len(events)))
+	for _, evt := range events {
+		evt.AddField(p.field, p.value)
 	}
 	p.metrics.AddProcessDuration(p.pipeline, "add_field", time.Since(start))
-	return messages, nil
+	return events, nil
 }

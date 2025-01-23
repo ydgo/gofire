@@ -1,8 +1,11 @@
 package component
 
-import "context"
+import (
+	"context"
+	"gofire/event"
+)
 
 type Receiver interface {
-	ReadMessage(ctx context.Context) (map[string]interface{}, error)
+	ReadMessage(ctx context.Context) (*event.Event, error)
 	Shutdown() error
 }

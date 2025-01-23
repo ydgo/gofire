@@ -1,7 +1,10 @@
 package component
 
+import "gofire/event"
+
 type Processor interface {
-	Process(...map[string]interface{}) ([]map[string]interface{}, error)
+	// Process 如果丢弃或者生成新的 event，需要释放原来的 event
+	Process(...*event.Event) ([]*event.Event, error)
 }
 
 type ProcessorNode struct {
@@ -13,17 +16,17 @@ type ProcessorLink struct {
 	root *ProcessorNode
 }
 
-func (l *ProcessorLink) Process(message map[string]interface{}) ([]map[string]interface{}, error) {
-	messages := make([]map[string]interface{}, 0, 1)
-	messages = append(messages, message)
+func (l *ProcessorLink) Process(evt *event.Event) ([]*event.Event, error) {
+	events := make([]*event.Event, 0, 1)
+	events = append(events, evt)
 	for node := l.root; node != nil; node = node.next {
 		var err error
-		messages, err = node.processor.Process(messages...)
+		events, err = node.processor.Process(events...) // evt 的释放由 Process 决定，如果仍需使用请复制一份
 		if err != nil {
 			return nil, err
 		}
 	}
-	return messages, nil
+	return events, nil
 }
 
 func (l *ProcessorLink) addProcessor(processor Processor) {

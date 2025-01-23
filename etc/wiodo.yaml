@@ -1,10 +1,9 @@
 receiver:
   type: http
   config:
-    id: "789"
     host: 127.0.0.1
     port: 8080
-    max_pending_requests: 100
+    max_pending_requests: 10000
 processors:
   - type: add_field
     config:

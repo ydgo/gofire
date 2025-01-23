@@ -3,6 +3,7 @@ package processor
 import (
 	"errors"
 	"gofire/component"
+	"gofire/event"
 	"gofire/metrics"
 	"strings"
 	"time"
@@ -25,26 +26,21 @@ func NewSplitProcessor(pipeName string, cfg map[string]interface{}, collector *m
 	return nil, errors.New("separator not found in config")
 }
 
-func (p *SplitProcessor) Process(messages ...map[string]interface{}) ([]map[string]interface{}, error) {
+func (p *SplitProcessor) Process(events ...*event.Event) ([]*event.Event, error) {
 	start := time.Now()
-	data := make([]map[string]interface{}, 0)
-	for _, message := range messages {
+	data := make([]*event.Event, 0)
+	for _, evt := range events {
 		// todo 每个 pipeline 可能会有多个同类型的 processor
 		p.metrics.IncTotal(p.pipeline, "split")
-		raw, ok := message["message"].(string)
-		if !ok {
-			// todo error ?
-			continue
+
+		raws := strings.Split(evt.Message, p.sep)
+		for _, raw := range raws {
+			newEvent := evt.Clone()
+			newEvent.SetMessage(raw)
+			data = append(data, newEvent)
 		}
-		raws := strings.Split(raw, p.sep)
-		for _, raw = range raws {
-			tmp := make(map[string]interface{})
-			for k, v := range message {
-				tmp[k] = v
-			}
-			tmp["message"] = raw
-			data = append(data, tmp)
-		}
+		// 丢弃并释放旧的 event
+		evt.Release()
 	}
 	p.metrics.AddProcessDuration(p.pipeline, "split", time.Since(start))
 	return data, nil

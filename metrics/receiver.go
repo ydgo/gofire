@@ -117,6 +117,6 @@ func (m *ReceiverBasicMetrics) Delete(pipeline string) {
 	m.LastReceiveTime.DeleteLabelValues(pipeline)
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	delete(m.CustomMetric, pipeline)
+	clear(m.CustomMetric)
 
 }
