@@ -2,7 +2,6 @@ package component
 
 import (
 	"fmt"
-	"gofire/metrics"
 	"sync"
 )
 
@@ -28,19 +27,13 @@ type Factory struct {
 	processors map[string]ProcessorCreator
 	exporters  map[string]ExporterCreator
 	mu         sync.RWMutex
-	metrics    *metrics.Collector
 }
 
-func (f *Factory) Metrics() *metrics.Collector {
-	return f.metrics
-}
-
-var factory = NewComponentFactory(metrics.Default())
+var factory = NewComponentFactory()
 
 // NewComponentFactory 创建新的组件工厂
-func NewComponentFactory(metrics *metrics.Collector) *Factory {
+func NewComponentFactory() *Factory {
 	return &Factory{
-		metrics:    metrics,
 		receivers:  make(map[string]ReceiverCreator),
 		processors: make(map[string]ProcessorCreator),
 		exporters:  make(map[string]ExporterCreator),
