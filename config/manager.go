@@ -196,7 +196,11 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Exporters
 	var exporters []component.Exporter
 	for _, e := range config.Exporters {
-		exporter, err := m.factory.CreateExporter(config.name, e.Type, e.Config)
+		exporter, err := m.factory.CreateExporter(component.ExporterOpts{
+			Pipeline:      config.name,
+			ComponentType: e.Type,
+			Setting:       e.Config,
+		})
 		if err != nil {
 			return fmt.Errorf("创建 Exporter 失败: %w", err)
 		}
