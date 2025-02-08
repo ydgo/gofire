@@ -170,7 +170,11 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 // createPipeline 根据配置创建 Pipeline
 func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Receiver
-	receiver, err := m.factory.CreateReceiver(config.name, config.Receiver.Type, config.Receiver.Config)
+	receiver, err := m.factory.CreateReceiver(component.ReceiverOpts{
+		Pipeline:      config.name,
+		ComponentType: config.Receiver.Type,
+		Setting:       config.Receiver.Config,
+	})
 	if err != nil {
 		return fmt.Errorf("创建 Receiver 失败: %w", err)
 	}

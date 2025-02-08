@@ -6,9 +6,17 @@ import (
 	"sync"
 )
 
+type Opts struct {
+	Pipeline      string
+	ComponentType string
+	Setting       map[string]any // 配置
+}
+
+type ReceiverOpts Opts
+
 // 定义组件创建器的函数类型
 
-type ReceiverCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Receiver, error)
+type ReceiverCreator func(opts ReceiverOpts) (Receiver, error)
 type ProcessorCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Processor, error)
 type ExporterCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Exporter, error)
 
@@ -71,15 +79,15 @@ func RegisterExporter(typeName string, creator ExporterCreator) {
 }
 
 // CreateReceiver 创建接收器实例
-func (f *Factory) CreateReceiver(pipeName string, typeName string, config map[string]interface{}) (Receiver, error) {
+func (f *Factory) CreateReceiver(opts ReceiverOpts) (Receiver, error) {
 	f.mu.RLock()
-	creator, exists := f.receivers[typeName]
+	creator, exists := f.receivers[opts.ComponentType]
 	f.mu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("未知的接收器类型: %s", typeName)
+		return nil, fmt.Errorf("未知的接收器类型: %s", opts.ComponentType)
 	}
-	return creator(pipeName, config, f.metrics)
+	return creator(opts)
 }
 
 // CreateProcessor 创建处理器实例

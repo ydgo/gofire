@@ -2,11 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"gofire/component"
 	"gofire/event"
 	"gofire/metrics"
 	"gofire/pkg/logger"
+	"io"
 	"sync"
 	"time"
 )
@@ -72,76 +74,38 @@ func (p *Pipeline) Start() error {
 // run 运行主处理循环
 func (p *Pipeline) run() {
 	defer p.wg.Done()
-	batch := make([]*event.Event, 0, p.batchSize)
-	ticker := time.NewTicker(p.flushInterval)
-	defer ticker.Stop()
-
 	for {
-		select {
-		case <-p.ctx.Done():
-			// 处理剩余的批次
-			if len(batch) > 0 {
-				p.processBatch(batch)
-			}
-			return
-
-		case <-ticker.C:
-			// 定时刷新
-			if len(batch) > 0 {
-				p.processBatch(batch)
-				batch = make([]*event.Event, 0, p.batchSize)
-			}
-
-		default:
-			// 尝试读取消息
-			msg, err := p.receiver.ReadMessage(p.ctx)
-			if err != nil {
+		message, err := p.receiver.ReadMessage(p.ctx)
+		if err != nil {
+			if !(errors.Is(err, context.Canceled) || errors.Is(err, io.EOF)) {
 				p.errChan <- fmt.Errorf("读取消息错误: %w", err)
-				close(p.errChan)
-				return
 			}
-
-			// 如果返回nil且没有错误，说明已经读取完毕
-			if msg == nil {
-				if len(batch) > 0 {
-					p.processBatch(batch)
-				}
-				return
-			}
-
-			// 添加到批次
-			batch = append(batch, msg)
-			if len(batch) >= p.batchSize {
-				p.processBatch(batch)
-				batch = make([]*event.Event, 0, p.batchSize)
-			}
+			close(p.errChan)
+			return
 		}
+		p.processEvent(message)
 	}
 }
 
-// processBatch 处理一批数据
-func (p *Pipeline) processBatch(batch []*event.Event) {
-	p.metrics.AddIn(p.name, float64(len(batch)))
-	// 处理数据
-	for _, evt := range batch {
-		processed, err := p.processorLink.Process(evt) // evt 的释放由 Process 决定，如果仍需使用请复制一份
-		if err != nil {
-			logger.Warnf("处理消息错误: %s", err)
-			p.metrics.AddFailure(p.name, 1)
-			continue
-		}
-		p.metrics.AddProcessed(p.name, 1)
-
-		// 导出处理后的数据
-		// processed 中的 event 由 Export 负责释放
-		if err = p.exporters.Export(processed...); err != nil {
-			logger.Warnf("导出消息错误: %s", err)
-			p.metrics.AddFailure(p.name, 1)
-			continue
-		}
-		// todo 这里的不包含 split 生成的数据
-		p.metrics.AddOut(p.name, 1)
+// process 处理一批数据
+func (p *Pipeline) processEvent(evt *event.Event) {
+	processed, err := p.processorLink.Process(evt) // evt 的释放由 Process 决定，如果仍需使用请复制一份
+	if err != nil {
+		logger.Warnf("处理消息错误: %s", err)
+		p.metrics.AddFailure(p.name, 1)
+		return
 	}
+	p.metrics.AddProcessed(p.name, 1)
+
+	// 导出处理后的数据
+	// processed 中的 event 由 Export 负责释放
+	if err = p.exporters.Export(processed...); err != nil {
+		logger.Warnf("导出消息错误: %s", err)
+		p.metrics.AddFailure(p.name, 1)
+		return
+	}
+	// todo 这里的不包含 split 生成的数据
+	p.metrics.AddOut(p.name, 1)
 }
 
 // Stop 停止处理管道
@@ -166,10 +130,8 @@ func (p *Pipeline) Stop() error {
 		if err := p.receiver.Shutdown(); err != nil {
 			shutdownErr = fmt.Errorf("关闭receiver错误: %w", err)
 		}
-		// 无论 receiver 关闭是否成功，都发送取消信号以停止处理循环
-		p.cancel()
 
-		// 等待处理完成
+		// 等待 run 循环完成
 		done := make(chan struct{})
 		go func() {
 			p.wg.Wait()
@@ -182,6 +144,8 @@ func (p *Pipeline) Stop() error {
 		case <-done:
 			// 正常关闭
 		case <-timeout:
+			// 发送取消信号以停止处理循环
+			p.cancel()
 			if shutdownErr != nil {
 				shutdownErr = fmt.Errorf("pipeline关闭超时且receiver关闭失败: %w", shutdownErr)
 				return
