@@ -3,9 +3,7 @@ package config
 import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
-	"github.com/prometheus/client_golang/prometheus"
 	"gofire/component"
-	"gofire/metrics"
 	"gofire/pipeline"
 	"gofire/pkg/logger"
 	"gopkg.in/yaml.v3"
@@ -41,8 +39,6 @@ type Manager struct {
 	configs     map[string]*PipelineConfig // key: file name
 	mu          sync.RWMutex
 	factory     *component.Factory // 用于创建组件的工厂
-	metrics     *metrics.ConfigMetrics
-	collector   *metrics.Collector
 }
 
 // NewConfigManager 创建新的配置管理器
@@ -58,8 +54,6 @@ func NewConfigManager(configDir string, pipelineMgr *pipeline.Manager, factory *
 		watcher:     watcher,
 		configs:     make(map[string]*PipelineConfig),
 		factory:     factory,
-		metrics:     factory.Metrics().ConfigMetrics(),
-		collector:   factory.Metrics(),
 	}
 
 	return cm, nil
@@ -88,7 +82,6 @@ func (m *Manager) loadAllConfigs() error {
 	if err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
 	}
-	m.metrics.Total.Set(float64(len(files)))
 	// 记录新的配置
 	newConfigs := make(map[string]*PipelineConfig)
 
@@ -150,7 +143,6 @@ func (m *Manager) updatePipelines(newConfigs map[string]*PipelineConfig) {
 			}
 		} else if !m.configEquals(oldConfig, newConfig) {
 			// todo  id 修改为 name
-			m.metrics.Reload.With(prometheus.Labels{"name": id}).Inc() // 重载指标
 			// 配置发生变化，重新创建 Pipeline
 			logger.Infof("更新 Pipeline: %s", id)
 			if err := m.pipelineMgr.StopPipeline(id); err != nil {
@@ -210,7 +202,6 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Pipeline
 	pipe := pipeline.NewPipeline(
 		config.name, // pipeline name
-		m.collector,
 		receiver,
 		component.BuildProcessorLink(processors...),
 		component.BuildExporters(exporters...),

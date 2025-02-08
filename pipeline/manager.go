@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"fmt"
-	"gofire/metrics"
 	"gofire/pkg/logger"
 	"sync"
 	"time"
@@ -30,7 +29,6 @@ type Info struct {
 
 // Manager 管理多个 Pipeline
 type Manager struct {
-	metrics   *metrics.PipelineManagerMetrics
 	pipelines map[string]*Pipeline // Pipeline 映射表
 	status    map[string]*Info     // Pipeline 状态信息
 	mu        sync.RWMutex         // 读写锁
@@ -39,10 +37,9 @@ type Manager struct {
 }
 
 // NewPipelineManager 创建新的 Pipeline 管理器
-func NewPipelineManager(collector *metrics.Collector) *Manager {
+func NewPipelineManager() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		metrics:   collector.PipelineManagerMetrics(),
 		pipelines: make(map[string]*Pipeline),
 		status:    make(map[string]*Info),
 		ctx:       ctx,
@@ -64,7 +61,6 @@ func (pm *Manager) RegisterPipeline(name string, pipeline *Pipeline) error {
 		Name:   name,
 		Status: StatusCreated,
 	}
-	pm.metrics.IncPipelineTotal()
 	return nil
 }
 
@@ -89,7 +85,7 @@ func (pm *Manager) StartPipeline(id string) error {
 	pm.mu.Unlock()
 
 	// 启动 Pipeline 并监控错误
-	_ = pipeline.Start()
+	pipeline.Start()
 	// 监控 Pipeline 错误
 	go pm.monitorPipeline(id, pipeline)
 
@@ -226,7 +222,6 @@ func (pm *Manager) updateStatus(name string, status Status, err error) {
 	if status == StatusStopped {
 		delete(pm.pipelines, name)
 		delete(pm.status, name)
-		pm.metrics.DecPipelineTotal()
 		return
 	}
 

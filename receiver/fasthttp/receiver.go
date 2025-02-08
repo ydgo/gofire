@@ -21,6 +21,8 @@ type Receiver struct {
 	engine *fasthttp.Server
 	cancel context.CancelFunc
 	events chan *event.Event
+
+	errChan chan error
 }
 
 func NewReceiver(opts component.ReceiverOpts) (component.Receiver, error) {
@@ -36,7 +38,8 @@ func NewReceiver(opts component.ReceiverOpts) (component.Receiver, error) {
 		queueCapacity = 500
 	}
 	receiver := &Receiver{
-		events: make(chan *event.Event, queueCapacity),
+		events:  make(chan *event.Event, queueCapacity),
+		errChan: make(chan error, 1),
 	}
 	receiver.engine = &fasthttp.Server{
 		Name:             "Go Fire",
@@ -47,8 +50,11 @@ func NewReceiver(opts component.ReceiverOpts) (component.Receiver, error) {
 		DisableKeepalive: false,
 	}
 	go func() {
+		defer close(receiver.events)
+		defer close(receiver.errChan)
 		if err := receiver.engine.ListenAndServe(fmt.Sprintf(":%d", port)); err != nil {
 			logger.Warnf("%s/%s ListenAndServe: %s", opts.Pipeline, opts.ComponentType, err.Error())
+			receiver.errChan <- err
 		}
 	}()
 	return receiver, nil
@@ -90,6 +96,11 @@ func (r *Receiver) ReadMessage(ctx context.Context) (evt *event.Event, err error
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case err = <-r.errChan:
+		if err != nil {
+			return nil, err
+		}
+		return nil, io.EOF
 	case data, ok := <-r.events:
 		if !ok {
 			return nil, io.EOF
@@ -100,7 +111,5 @@ func (r *Receiver) ReadMessage(ctx context.Context) (evt *event.Event, err error
 }
 
 func (r *Receiver) Shutdown() error {
-	err := r.engine.Shutdown() // 停止接收数据
-	close(r.events)            // 释放资源
-	return err
+	return r.engine.Shutdown() // 停止接收数据
 }
