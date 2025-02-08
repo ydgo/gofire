@@ -18,9 +18,8 @@ type Pipeline struct {
 	name          string
 	receiver      component.Receiver
 	processorLink *component.ProcessorLink
-	exporters     *component.Exporters
-
-	metrics *metrics.PipelineMetrics
+	exporters     component.Exporter
+	metrics       *metrics.PipelineMetrics
 
 	// 控制和状态
 	wg            sync.WaitGroup
@@ -36,7 +35,7 @@ type Pipeline struct {
 }
 
 // NewPipeline 创建新的处理管道
-func NewPipeline(name string, collector *metrics.Collector, receiver component.Receiver, processorLink *component.ProcessorLink, exporters *component.Exporters) *Pipeline {
+func NewPipeline(name string, collector *metrics.Collector, receiver component.Receiver, processorLink *component.ProcessorLink, exporters component.Exporter) *Pipeline {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
 		name:          name,
@@ -99,10 +98,12 @@ func (p *Pipeline) processEvent(evt *event.Event) {
 
 	// 导出处理后的数据
 	// processed 中的 event 由 Export 负责释放
-	if err = p.exporters.Export(processed...); err != nil {
-		logger.Warnf("导出消息错误: %s", err)
-		p.metrics.AddFailure(p.name, 1)
-		return
+	for _, e := range processed {
+		if err = p.exporters.Export(e); err != nil {
+			logger.Warnf("导出消息错误: %s", err)
+			p.metrics.AddFailure(p.name, 1)
+			return
+		}
 	}
 	// todo 这里的不包含 split 生成的数据
 	p.metrics.AddOut(p.name, 1)
