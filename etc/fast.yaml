@@ -2,6 +2,11 @@ receiver:
   type: fasthttp
   config:
     port: 8081
+processors:
+  - type: add_field
+    config:
+      field: name
+      value: gofire
 exporters:
   - type: stdout
 

@@ -182,7 +182,11 @@ func (m *Manager) createPipeline(config *PipelineConfig) error {
 	// 创建 Processors
 	var processors []component.Processor
 	for _, p := range config.Processors {
-		processor, err := m.factory.CreateProcessor(config.name, p.Type, p.Config)
+		processor, err := m.factory.CreateProcessor(component.ProcessorOpts{
+			Pipeline:      config.name,
+			ComponentType: p.Type,
+			Setting:       p.Config,
+		})
 		if err != nil {
 			return fmt.Errorf("创建 Processor 失败: %w", err)
 		}

@@ -13,11 +13,12 @@ type Opts struct {
 }
 
 type ReceiverOpts Opts
+type ProcessorOpts Opts
 
 // 定义组件创建器的函数类型
 
 type ReceiverCreator func(opts ReceiverOpts) (Receiver, error)
-type ProcessorCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Processor, error)
+type ProcessorCreator func(opts ProcessorOpts) (Processor, error)
 type ExporterCreator func(pipeName string, config map[string]interface{}, metrics *metrics.Collector) (Exporter, error)
 
 // Factory 组件工厂，用于创建各种组件
@@ -91,16 +92,16 @@ func (f *Factory) CreateReceiver(opts ReceiverOpts) (Receiver, error) {
 }
 
 // CreateProcessor 创建处理器实例
-func (f *Factory) CreateProcessor(pipeName string, typeName string, config map[string]interface{}) (Processor, error) {
+func (f *Factory) CreateProcessor(opts ProcessorOpts) (Processor, error) {
 	f.mu.RLock()
-	creator, exists := f.processors[typeName]
+	creator, exists := f.processors[opts.ComponentType]
 	f.mu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("未知的处理器类型: %s", typeName)
+		return nil, fmt.Errorf("未知的处理器类型: %s", opts.ComponentType)
 	}
 
-	return creator(pipeName, config, f.metrics)
+	return creator(opts)
 }
 
 // CreateExporter 创建导出器实例
